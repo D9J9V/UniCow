@@ -1,29 +1,27 @@
 import { formatEther } from "viem";
 import { Mathb } from "./math";
-import { Feasibility, Matching, PossibleResult, Task } from "./utils";
+import { LoanTask, LoanFeasibility, LoanMatching, LoanMatchingResult, LoanOrderData } from "./utils";
 import bigDecimal from "js-big-decimal";
 
 const RoundingModes = bigDecimal.RoundingModes;
-interface TransferBalance {
+
+interface LoanTransfer {
+  lender: `0x${string}`;
+  borrower: `0x${string}`;
   amount: bigint;
-  currency: `0x${string}`;
-  sender: `0x${string}`;
+  rate: bigint;
+  maturityTimestamp: bigint;
 }
 
-interface SwapBalance {
-  amountSpecified: bigint;
-  zeroForOne: boolean;
-  sqrtPriceLimitX96: bigint;
-}
-
-export function generateTaskCombinations(tasks: Task[]): Task[][][] {
+// Generate all possible combinations of loan tasks for matching
+export function generateLoanTaskCombinations(tasks: LoanTask[]): LoanTask[][][] {
   if (tasks.length === 0) return [];
   if (tasks.length === 1) return [[[tasks[0]]]];
 
-  const result: Task[][][] = [];
+  const result: LoanTask[][][] = [];
   const firstTask = tasks[0];
   const restTasks = tasks.slice(1);
-  const subCombinations = generateTaskCombinations(restTasks);
+  const subCombinations = generateLoanTaskCombinations(restTasks);
 
   // Add the combination where the first task is separate from the rest
   result.push([[firstTask], restTasks]);
@@ -56,392 +54,350 @@ export function generateTaskCombinations(tasks: Task[]): Task[][][] {
   return removeDuplicates(result);
 }
 
-export function isCombinationPossible(combination: Task[][]): boolean {
+// Check if a combination of loan tasks can be matched
+export function isLoanCombinationPossible(combination: LoanTask[][]): boolean {
   for (const matching of combination) {
     if (matching.length == 1) continue;
 
-    // If there are more than 1 tasks in the matching,
-    // there should be at least 2 tasks that have the opposite zeroForOne value
-    let zeroForOneCount = 0;
-    let oneForZeroCount = 0;
-    for (const task of matching) {
-      task.zeroForOne ? zeroForOneCount++ : oneForZeroCount++;
-    }
-    if (zeroForOneCount === 0 || oneForZeroCount === 0) {
+    // Need at least one lender and one borrower in a matching group
+    const lenders = matching.filter(task => task.isLender);
+    const borrowers = matching.filter(task => !task.isLender);
+    
+    if (lenders.length === 0 || borrowers.length === 0) {
       return false;
+    }
+
+    // Check if there's rate overlap
+    const minLenderRate = Math.min(...lenders.map(l => Number(l.interestRateBips)));
+    const maxBorrowerRate = Math.max(...borrowers.map(b => Number(b.interestRateBips)));
+    
+    if (minLenderRate > maxBorrowerRate) {
+      return false; // No rate overlap
+    }
+
+    // Check maturity compatibility
+    const lenderMaturities = new Set(lenders.map(l => l.maturityTimestamp.toString()));
+    const borrowerMaturities = new Set(borrowers.map(b => b.maturityTimestamp.toString()));
+    
+    const hasCommonMaturity = [...lenderMaturities].some(m => borrowerMaturities.has(m));
+    if (!hasCommonMaturity) {
+      return false; // No common maturity dates
     }
   }
 
   return true;
 }
 
-export function computePossibleResult(
-  combination: Task[][],
-  sqrtPriceCurrentX96: bigint
-): PossibleResult {
-  const result: Partial<PossibleResult> = {};
+// Compute the result of a loan matching combination
+export function computeLoanMatchingResult(
+  combination: LoanTask[][]
+): LoanMatchingResult {
+  const result: Partial<LoanMatchingResult> = {};
+  const matchings: LoanMatching[] = [];
 
-  const matchings: Matching[] = [];
+  // Initialize totals
+  let totalLenderAmount = BigInt(0);
+  let totalBorrowerAmount = BigInt(0);
+  let totalMatchedAmount = BigInt(0);
+  let weightedLenderRate = BigInt(0);
+  let weightedBorrowerRate = BigInt(0);
 
-  // set poolSpotPrice
-  const priceCurrentNumber = getPriceFromSqrtX96(sqrtPriceCurrentX96);
-  result.poolSpotPrice = priceCurrentNumber;
-
-  // compute total pool inputs and outputs
-  let totalPoolToken0Input = BigInt(0);
-  let totalPoolToken1Input = BigInt(0);
-  let totalPoolToken0Output = BigInt(0);
-  let totalPoolToken1Output = BigInt(0);
-
+  // Process each matching group
   for (const matching of combination) {
-    for (const task of matching) {
-      if (task.zeroForOne) {
-        totalPoolToken0Input += task.poolInputAmount ?? BigInt(0);
-        totalPoolToken1Output += task.poolOutputAmount ?? BigInt(0);
-      } else {
-        totalPoolToken1Input += task.poolInputAmount ?? BigInt(0);
-        totalPoolToken0Output += task.poolOutputAmount ?? BigInt(0);
-      }
-    }
-  }
+    const lenders = matching.filter(task => task.isLender);
+    const borrowers = matching.filter(task => !task.isLender);
 
-  result.totalPoolToken0Input = totalPoolToken0Input;
-  result.totalPoolToken1Input = totalPoolToken1Input;
-  result.totalPoolToken0Output = totalPoolToken0Output;
-  result.totalPoolToken1Output = totalPoolToken1Output;
-  result.poolAveragePrice = getAverageSwapPrice({
-    token0Input: totalPoolToken0Input,
-    token1Input: totalPoolToken1Input,
-    token0Output: totalPoolToken0Output,
-    token1Output: totalPoolToken1Output,
-  });
-
-  // compute matching trades
-  let totalToken0Input = BigInt(0);
-  let totalToken1Input = BigInt(0);
-  let totalToken0Output = BigInt(0);
-  let totalToken1Output = BigInt(0);
-  for (const matching of combination) {
-    if (matching.length == 1) {
+    // Single task - no matching possible
+    if (matching.length === 1) {
       const task = matching[0];
-      if (task.zeroForOne) {
-        totalToken0Input += task.poolInputAmount ?? BigInt(0);
-        totalToken1Output += task.poolOutputAmount ?? BigInt(0);
-        matchings.push({
-          tasks: [task],
-          totalToken0Input: task.poolInputAmount!,
-          totalToken1Input: BigInt(0),
-          totalToken0Output: BigInt(0),
-          totalToken1Output: task.poolOutputAmount!,
-          feasibility: Feasibility.SWAP_EACH_TASK,
-        });
+      if (task.isLender) {
+        totalLenderAmount += task.principalAmount;
       } else {
-        totalToken1Input += task.poolInputAmount ?? BigInt(0);
-        totalToken0Output += task.poolOutputAmount ?? BigInt(0);
-
-        matchings.push({
-          tasks: [task],
-          totalToken0Input: BigInt(0),
-          totalToken1Input: task.poolInputAmount!,
-          totalToken0Output: task.poolOutputAmount!,
-          totalToken1Output: BigInt(0),
-          feasibility: Feasibility.SWAP_EACH_TASK,
-        });
+        totalBorrowerAmount += task.principalAmount;
       }
-
+      
+      matchings.push({
+        loanTasks: [task],
+        feasibility: LoanFeasibility.NONE,
+        totalLenderAmount: task.isLender ? task.principalAmount : BigInt(0),
+        totalBorrowerAmount: !task.isLender ? task.principalAmount : BigInt(0),
+        matchedAmount: BigInt(0),
+        effectiveRate: BigInt(0),
+        maturityTimestamp: task.maturityTimestamp,
+      });
       continue;
     }
 
-    let currMatching: Matching = {
-      tasks: matching,
-      totalToken0Input: BigInt(0),
-      totalToken1Input: BigInt(0),
-      totalToken0Output: BigInt(0),
-      totalToken1Output: BigInt(0),
-      feasibility: Feasibility.NONE,
+    // Multi-task matching
+    let matchingResult: LoanMatching = {
+      loanTasks: matching,
+      feasibility: LoanFeasibility.NONE,
+      totalLenderAmount: BigInt(0),
+      totalBorrowerAmount: BigInt(0),
+      matchedAmount: BigInt(0),
+      effectiveRate: BigInt(0),
+      maturityTimestamp: BigInt(0),
     };
 
-    // If there are more than 1 tasks in the matching
-    const zeroForOneTasks = matching.filter((task) => task.zeroForOne);
-    const oneForZeroTasks = matching.filter((task) => !task.zeroForOne);
+    // Calculate available amounts
+    let availableLenderAmount = BigInt(0);
+    let availableBorrowerAmount = BigInt(0);
+    let minLenderRate = BigInt(Number.MAX_SAFE_INTEGER);
+    let maxBorrowerRate = BigInt(0);
 
-    if (zeroForOneTasks.length === 0 || oneForZeroTasks.length === 0) {
-      currMatching.feasibility = Feasibility.NONE;
+    for (const lender of lenders) {
+      availableLenderAmount += lender.principalAmount;
+      minLenderRate = Mathb.min(minLenderRate, lender.interestRateBips);
+      matchingResult.totalLenderAmount += lender.principalAmount;
+    }
+
+    for (const borrower of borrowers) {
+      availableBorrowerAmount += borrower.principalAmount;
+      maxBorrowerRate = Mathb.max(maxBorrowerRate, borrower.interestRateBips);
+      matchingResult.totalBorrowerAmount += borrower.principalAmount;
+    }
+
+    // Check rate compatibility
+    if (minLenderRate > maxBorrowerRate) {
+      matchingResult.feasibility = LoanFeasibility.NO_RATE_OVERLAP;
+      matchings.push(matchingResult);
       continue;
     }
 
-    let availableToken0 = BigInt(0);
-    let availableToken1 = BigInt(0);
-
-    let minimumSqrtPriceLimitX96 = BigInt(sqrtPriceCurrentX96);
-    let maximumSqrtPriceLimitX96 = BigInt(0);
-
-    for (const task of zeroForOneTasks) {
-      availableToken0 += Mathb.abs(task.amountSpecified);
-      minimumSqrtPriceLimitX96 = Mathb.min(
-        minimumSqrtPriceLimitX96,
-        task.sqrtPriceLimitX96
-      );
+    // Find common maturity
+    const commonMaturities = findCommonMaturities(lenders, borrowers);
+    if (commonMaturities.length === 0) {
+      matchingResult.feasibility = LoanFeasibility.MATURITY_MISMATCH;
+      matchings.push(matchingResult);
+      continue;
     }
 
-    for (const task of oneForZeroTasks) {
-      availableToken1 += Mathb.abs(task.amountSpecified);
-      maximumSqrtPriceLimitX96 = Mathb.max(
-        maximumSqrtPriceLimitX96,
-        task.sqrtPriceLimitX96
-      );
-    }
+    // Use the earliest common maturity
+    matchingResult.maturityTimestamp = commonMaturities[0];
 
-    currMatching.totalToken0Input = availableToken0;
-    currMatching.totalToken1Input = availableToken1;
+    // Calculate matched amount and effective rate
+    const matchedAmountLocal = Mathb.min(availableLenderAmount, availableBorrowerAmount);
+    matchingResult.matchedAmount = matchedAmountLocal;
 
-    const minimumPrice = getPriceFromSqrtX96(minimumSqrtPriceLimitX96);
-    const maximumPrice = getPriceFromSqrtX96(maximumSqrtPriceLimitX96);
+    // Calculate effective rate (weighted average between min lender and max borrower rates)
+    // This ensures both sides get a fair rate
+    const effectiveRate = (minLenderRate + maxBorrowerRate) / BigInt(2);
+    matchingResult.effectiveRate = effectiveRate;
 
-    // check if availableToken0Input can be matched against availableToken1Input
-    // at an execution price of roughly poolSpotPrice
+    // Update totals
+    totalMatchedAmount += matchedAmountLocal;
+    weightedLenderRate += effectiveRate * matchedAmountLocal;
+    weightedBorrowerRate += effectiveRate * matchedAmountLocal;
 
-    const idealToken1OutputForToken0 = getIdealOutputForSpotPrice(
-      availableToken0,
-      result.poolSpotPrice,
-      true
-    );
-
-    const minimumToken1OutputForToken0 = getIdealOutputForSpotPrice(
-      availableToken0,
-      minimumPrice,
-      true
-    );
-
-    const idealToken0OutputForToken1 = getIdealOutputForSpotPrice(
-      availableToken1,
-      result.poolSpotPrice,
-      false
-    );
-
-    const minimumToken0OutputForToken1 = getIdealOutputForSpotPrice(
-      availableToken1,
-      maximumPrice,
-      false
-    );
-
-    totalToken0Input += availableToken0;
-    totalToken1Input += availableToken1;
-
-    if (
-      idealToken1OutputForToken0 <= availableToken1 &&
-      idealToken0OutputForToken1 <= availableToken0
-    ) {
-      totalToken0Output += idealToken0OutputForToken1;
-      totalToken1Output += idealToken1OutputForToken0;
-      currMatching.totalToken0Output = idealToken0OutputForToken1;
-      currMatching.totalToken1Output = idealToken1OutputForToken0;
-      currMatching.feasibility = Feasibility.IDEAL;
-    } else if (
-      idealToken1OutputForToken0 <= availableToken1 &&
-      minimumToken0OutputForToken1 <= availableToken0
-    ) {
-      totalToken0Output += availableToken0;
-      totalToken1Output += idealToken1OutputForToken0;
-      currMatching.totalToken0Output = availableToken0;
-      currMatching.totalToken1Output = idealToken1OutputForToken0;
-      currMatching.feasibility = Feasibility.IDEAL_ZERO_FOR_ONE;
-    } else if (
-      idealToken0OutputForToken1 <= availableToken0 &&
-      minimumToken1OutputForToken0 <= availableToken1
-    ) {
-      totalToken0Output += idealToken0OutputForToken1;
-      totalToken1Output += availableToken1;
-      currMatching.totalToken0Output = idealToken0OutputForToken1;
-      currMatching.totalToken1Output = availableToken1;
-      currMatching.feasibility = Feasibility.IDEAL_ONE_FOR_ZERO;
+    // Determine feasibility type
+    if (availableLenderAmount === availableBorrowerAmount) {
+      matchingResult.feasibility = LoanFeasibility.FULL_MATCH;
+    } else if (availableLenderAmount > availableBorrowerAmount) {
+      matchingResult.feasibility = LoanFeasibility.PARTIAL_LENDER;
     } else {
-      currMatching.feasibility = Feasibility.NONE;
+      matchingResult.feasibility = LoanFeasibility.PARTIAL_BORROWER;
     }
 
-    matchings.push(currMatching);
+    matchings.push(matchingResult);
+
+    // Update global totals
+    totalLenderAmount += matchingResult.totalLenderAmount;
+    totalBorrowerAmount += matchingResult.totalBorrowerAmount;
   }
 
-  const isResultFeasible =
-    matchings.some((matching) => matching.feasibility === Feasibility.NONE) ===
-    false;
-
-  if (isResultFeasible) {
-    result.matchingAveragePrice = getAverageSwapPrice({
-      token0Input: totalToken0Input,
-      token1Input: totalToken1Input,
-      token0Output: totalToken0Output,
-      token1Output: totalToken1Output,
-    });
-  } else {
-    result.matchingAveragePrice = new bigDecimal(0);
-  }
-
+  // Calculate final metrics
+  const isResultFeasible = totalMatchedAmount > BigInt(0);
+  
   result.matchings = matchings;
-  result.totalToken0Input = totalToken0Input;
-  result.totalToken1Input = totalToken1Input;
-  result.totalToken0Output = totalToken0Output;
-  result.totalToken1Output = totalToken1Output;
-  result.feasible = isResultFeasible;
-
-  return result as PossibleResult;
-}
-
-function getPriceFromSqrtX96(sqrtPriceX96: bigint) {
-  const Q96 = new bigDecimal("79228162514264337593543950336");
-  const sqrtPriceX96Decimal = new bigDecimal(sqrtPriceX96);
-  const sqrtPriceCurrent = sqrtPriceX96Decimal.divide(
-    Q96,
-    18,
-    RoundingModes.FLOOR
-  );
-  const priceCurrent = sqrtPriceCurrent.multiply(sqrtPriceCurrent);
-  return Number(priceCurrent.getValue());
-}
-
-function getIdealOutputForSpotPrice(
-  inputAmount: bigint,
-  priceCurrent: number,
-  zeroForOne: boolean
-) {
-  const priceCurrentDecimal = new bigDecimal(priceCurrent);
-  let inputAmountDecimal = new bigDecimal(inputAmount);
-  let outputAmountDecimal: bigDecimal;
-
-  // Price is always represented as token0 in terms of token1
-  // e.g. if 1 Token0 = 100 Token1
-  // then price = 100 / 1 = 100
-  // if 1 Token1 = 100 Token0
-  // then price = 1 / 100 = 0.01
-  if (zeroForOne) {
-    // outputAmount = inputAmount * P
-    outputAmountDecimal = inputAmountDecimal.multiply(priceCurrentDecimal);
+  result.totalLenderAmount = totalLenderAmount;
+  result.totalBorrowerAmount = totalBorrowerAmount;
+  result.totalMatchedAmount = totalMatchedAmount;
+  result.unmatchedLenderAmount = totalLenderAmount - totalMatchedAmount;
+  result.unmatchedBorrowerAmount = totalBorrowerAmount - totalMatchedAmount;
+  
+  // Calculate average rates
+  if (totalMatchedAmount > BigInt(0)) {
+    result.averageLenderRate = new bigDecimal(weightedLenderRate.toString())
+      .divide(new bigDecimal(totalMatchedAmount.toString()), 4, RoundingModes.FLOOR);
+    result.averageBorrowerRate = result.averageLenderRate; // Same rate for both sides
   } else {
-    // outputAmount = inputAmount / P
-    outputAmountDecimal = inputAmountDecimal.divide(
-      priceCurrentDecimal,
-      18,
-      RoundingModes.FLOOR
-    );
+    result.averageLenderRate = new bigDecimal(0);
+    result.averageBorrowerRate = new bigDecimal(0);
   }
 
-  return BigInt(outputAmountDecimal.floor().getValue());
+  result.feasible = isResultFeasible;
+  result.feasibilityType = determineFeasibilityType(matchings);
+  
+  // Calculate rate spread (should be 0 for matched orders)
+  result.rateSpread = new bigDecimal(0);
+  
+  // Calculate matching efficiency
+  const totalAmount = totalLenderAmount + totalBorrowerAmount;
+  if (totalAmount > BigInt(0)) {
+    result.matchingEfficiency = new bigDecimal(totalMatchedAmount.toString())
+      .multiply(new bigDecimal("2")) // Multiply by 2 because matched amount counts for both sides
+      .divide(new bigDecimal(totalAmount.toString()), 4, RoundingModes.FLOOR);
+  } else {
+    result.matchingEfficiency = new bigDecimal(0);
+  }
+
+  return result as LoanMatchingResult;
 }
 
-export function computeBestResult(possibleResults: PossibleResult[]) {
-  let bestResultBasedOnTotalOutput: PossibleResult | null = null;
+// Find the best result from multiple possible combinations
+export function computeBestLoanResult(possibleResults: LoanMatchingResult[]): LoanMatchingResult {
+  let bestResult: LoanMatchingResult | null = null;
 
-  for (const possibleResult of possibleResults) {
-    if (bestResultBasedOnTotalOutput === null) {
-      bestResultBasedOnTotalOutput = possibleResult;
+  for (const result of possibleResults) {
+    if (!result.feasible) continue;
+
+    if (bestResult === null) {
+      bestResult = result;
       continue;
     }
 
-    const totalToken0Output = possibleResult.totalToken0Output;
-    const totalToken1Output = possibleResult.totalToken1Output;
-
-    if (
-      totalToken0Output > bestResultBasedOnTotalOutput.totalToken0Output &&
-      totalToken1Output > bestResultBasedOnTotalOutput.totalToken1Output
-    ) {
-      bestResultBasedOnTotalOutput = possibleResult;
+    // Optimize for:
+    // 1. Maximum matched amount
+    // 2. Best matching efficiency
+    // 3. Lowest average borrower rate
+    
+    if (result.totalMatchedAmount > bestResult.totalMatchedAmount) {
+      bestResult = result;
+    } else if (result.totalMatchedAmount === bestResult.totalMatchedAmount) {
+      // If matched amounts are equal, prefer better efficiency
+      if (result.matchingEfficiency.compareTo(bestResult.matchingEfficiency) > 0) {
+        bestResult = result;
+      } else if (result.matchingEfficiency.compareTo(bestResult.matchingEfficiency) === 0) {
+        // If efficiency is also equal, prefer lower borrower rate
+        if (result.averageBorrowerRate.compareTo(bestResult.averageBorrowerRate) < 0) {
+          bestResult = result;
+        }
+      }
     }
   }
 
-  return bestResultBasedOnTotalOutput as PossibleResult;
+  return bestResult || possibleResults[0];
 }
 
-export function computeBalances(possibleResult: PossibleResult) {
-  const transferBalances: TransferBalance[] = [];
-  const swapBalances: SwapBalance[] = [];
-
-  // taskId to analysis
+// Compute the loan transfers that need to happen
+export function computeLoanTransfers(result: LoanMatchingResult): {
+  transfers: LoanTransfer[];
+  analysis: Record<string, string>;
+} {
+  const transfers: LoanTransfer[] = [];
   const analysis: Record<string, string> = {};
 
-  for (const matching of possibleResult.matchings) {
-    if (matching.feasibility === Feasibility.SWAP_EACH_TASK) {
-      for (const task of matching.tasks) {
-        swapBalances.push({
-          amountSpecified: task.amountSpecified,
-          zeroForOne: task.zeroForOne,
-          sqrtPriceLimitX96: task.sqrtPriceLimitX96,
-        });
-
-        analysis[task.taskId] = `Task ${
-          task.taskId
-        } got swapped through AMM. Receiving ${formatEther(
-          task.poolOutputAmount!
-        )} tokens for ${formatEther(task.poolInputAmount!)} tokens`;
+  for (const matching of result.matchings) {
+    if (matching.feasibility === LoanFeasibility.NONE || 
+        matching.feasibility === LoanFeasibility.NO_RATE_OVERLAP ||
+        matching.feasibility === LoanFeasibility.MATURITY_MISMATCH) {
+      
+      for (const task of matching.loanTasks) {
+        analysis[task.taskId.toString()] = `Task ${task.taskId} could not be matched: ${matching.feasibility}`;
       }
-
       continue;
     }
 
-    for (const task of matching.tasks) {
-      if (task.zeroForOne) {
-        const inputShare = new bigDecimal(task.poolInputAmount!).divide(
-          new bigDecimal(matching.totalToken0Input),
-          18,
-          RoundingModes.FLOOR
-        );
-        const outputAmount = inputShare.multiply(
-          new bigDecimal(matching.totalToken1Output)
-        );
-        const outputAmountBigInt = BigInt(outputAmount.floor().getValue());
-
-        transferBalances.push({
-          amount: outputAmountBigInt,
-          currency: task.poolKey.currency1,
-          sender: task.sender as `0x${string}`,
-        });
-
-        const extraOutputAmount = outputAmountBigInt - task.poolOutputAmount!;
-
-        analysis[task.taskId] = `Task ${
-          task.taskId
-        } got CoW matched. Receiving ${formatEther(
-          outputAmountBigInt
-        )} tokens for ${formatEther(
-          task.poolInputAmount!
-        )} tokens, which is ${formatEther(
-          extraOutputAmount
-        )} tokens more than the AMM's output`;
-      } else {
-        const inputShare = new bigDecimal(task.poolInputAmount!).divide(
-          new bigDecimal(matching.totalToken1Input),
-          18,
-          RoundingModes.FLOOR
-        );
-        const outputAmount = inputShare.multiply(
-          new bigDecimal(matching.totalToken0Output)
-        );
-        const outputAmountBigInt = BigInt(outputAmount.floor().getValue());
-
-        transferBalances.push({
-          amount: BigInt(outputAmount.floor().getValue()),
-          currency: task.poolKey.currency0,
-          sender: task.sender as `0x${string}`,
-        });
-
-        const extraOutputAmount = outputAmountBigInt - task.poolOutputAmount!;
-
-        analysis[task.taskId] = `Task ${
-          task.taskId
-        } got CoW matched. Receiving ${formatEther(
-          outputAmountBigInt
-        )} tokens for ${formatEther(
-          task.poolInputAmount!
-        )} tokens, which is ${formatEther(
-          extraOutputAmount
-        )} tokens more than the AMM's output`;
+    const lenders = matching.loanTasks.filter(t => t.isLender);
+    const borrowers = matching.loanTasks.filter(t => !t.isLender);
+    
+    // Distribute matched amount proportionally
+    let remainingAmount = matching.matchedAmount;
+    
+    for (const borrower of borrowers) {
+      const borrowerShare = matching.totalBorrowerAmount > BigInt(0)
+        ? (borrower.principalAmount * matching.matchedAmount) / matching.totalBorrowerAmount
+        : BigInt(0);
+      
+      let borrowerRemaining = borrowerShare;
+      
+      for (const lender of lenders) {
+        if (borrowerRemaining === BigInt(0)) break;
+        
+        const lenderShare = matching.totalLenderAmount > BigInt(0)
+          ? (lender.principalAmount * matching.matchedAmount) / matching.totalLenderAmount
+          : BigInt(0);
+        
+        const transferAmount = Mathb.min(borrowerRemaining, lenderShare);
+        
+        if (transferAmount > BigInt(0)) {
+          transfers.push({
+            lender: lender.sender,
+            borrower: borrower.sender,
+            amount: transferAmount,
+            rate: matching.effectiveRate,
+            maturityTimestamp: matching.maturityTimestamp,
+          });
+          
+          borrowerRemaining -= transferAmount;
+        }
       }
+      
+      analysis[borrower.taskId.toString()] = `Borrower ${borrower.taskId} matched ${formatEther(borrowerShare)} USDC at ${Number(matching.effectiveRate) / 100}% APR`;
+    }
+    
+    for (const lender of lenders) {
+      const lenderShare = matching.totalLenderAmount > BigInt(0)
+        ? (lender.principalAmount * matching.matchedAmount) / matching.totalLenderAmount
+        : BigInt(0);
+      
+      analysis[lender.taskId.toString()] = `Lender ${lender.taskId} matched ${formatEther(lenderShare)} USDC at ${Number(matching.effectiveRate) / 100}% APR`;
     }
   }
 
-  return { swapBalances, transferBalances, analysis };
+  return { transfers, analysis };
 }
 
-function removeDuplicates(combinations: Task[][][]): Task[][][] {
+// Helper function to find common maturity dates
+function findCommonMaturities(lenders: LoanTask[], borrowers: LoanTask[]): bigint[] {
+  const lenderMaturities = new Set(lenders.map(l => l.maturityTimestamp.toString()));
+  const borrowerMaturities = new Set(borrowers.map(b => b.maturityTimestamp.toString()));
+  
+  const common: bigint[] = [];
+  for (const maturity of lenderMaturities) {
+    if (borrowerMaturities.has(maturity)) {
+      common.push(BigInt(maturity));
+    }
+  }
+  
+  return common.sort((a, b) => Number(a - b));
+}
+
+// Helper function to determine overall feasibility type
+function determineFeasibilityType(matchings: LoanMatching[]): LoanFeasibility {
+  const hasMatches = matchings.some(m => 
+    m.feasibility === LoanFeasibility.FULL_MATCH ||
+    m.feasibility === LoanFeasibility.PARTIAL_LENDER ||
+    m.feasibility === LoanFeasibility.PARTIAL_BORROWER
+  );
+  
+  if (!hasMatches) {
+    return LoanFeasibility.NONE;
+  }
+  
+  const allFull = matchings.every(m => 
+    m.feasibility === LoanFeasibility.FULL_MATCH || 
+    m.feasibility === LoanFeasibility.NONE
+  );
+  
+  if (allFull) {
+    return LoanFeasibility.FULL_MATCH;
+  }
+  
+  const hasPartialLender = matchings.some(m => m.feasibility === LoanFeasibility.PARTIAL_LENDER);
+  const hasPartialBorrower = matchings.some(m => m.feasibility === LoanFeasibility.PARTIAL_BORROWER);
+  
+  if (hasPartialLender && hasPartialBorrower) {
+    return LoanFeasibility.PARTIAL_BOTH;
+  } else if (hasPartialLender) {
+    return LoanFeasibility.PARTIAL_LENDER;
+  } else {
+    return LoanFeasibility.PARTIAL_BORROWER;
+  }
+}
+
+// Helper function to remove duplicate combinations
+function removeDuplicates(combinations: LoanTask[][][]): LoanTask[][][] {
   const uniqueCombinations = new Set<string>();
 
   return combinations.filter((combination) => {
@@ -454,43 +410,4 @@ function removeDuplicates(combinations: Task[][][]): Task[][][] {
     }
     return false;
   });
-}
-
-function getAverageSwapPrice(params: {
-  token0Input: bigint;
-  token1Input: bigint;
-  token0Output: bigint;
-  token1Output: bigint;
-}) {
-  const zero = BigInt(0);
-  const { token0Input, token1Input, token0Output, token1Output } = params;
-  if (
-    token0Input === zero ||
-    token1Input === zero ||
-    token0Output === zero ||
-    token1Output === zero
-  ) {
-    return new bigDecimal(0);
-  }
-
-  const token0InputDecimal = new bigDecimal(params.token0Input);
-  const token1InputDecimal = new bigDecimal(params.token1Input);
-  const token0OutputDecimal = new bigDecimal(params.token0Output);
-  const token1OutputDecimal = new bigDecimal(params.token1Output);
-
-  const oneHalf = token1OutputDecimal.divide(
-    token0InputDecimal,
-    18,
-    RoundingModes.FLOOR
-  );
-  const secondHalf = token1InputDecimal.divide(
-    token0OutputDecimal,
-    18,
-    RoundingModes.FLOOR
-  );
-
-  const numerator = oneHalf.add(secondHalf);
-  const denominator = new bigDecimal(2);
-
-  return numerator.divide(denominator, 18, RoundingModes.FLOOR);
 }

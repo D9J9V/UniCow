@@ -19,57 +19,89 @@ import { deploymentAddresses } from "./deployment_addresses";
 import { PoolManagerABI } from "./abis/PoolManager";
 import bigDecimal from "js-big-decimal";
 
-export type Task = {
-  zeroForOne: boolean;
-  amountSpecified: bigint;
-  sqrtPriceLimitX96: bigint;
-  sender: `0x${string}`;
-  poolId: `0x${string}`;
-  poolKey: PoolKey;
-  taskCreatedBlock: number;
-  taskId: number;
-
-  poolOutputAmount: bigint | null;
-  poolInputAmount: bigint | null;
+// Changed from Task to LoanTask for debt order matching
+export type LoanTask = {
+  // Core loan parameters
+  isLender: boolean;              // replaces zeroForOne - true for lenders, false for borrowers
+  principalAmount: bigint;        // replaces amountSpecified - amount of USDC
+  interestRateBips: bigint;       // replaces sqrtPriceLimitX96 - interest rate in basis points
+  maturityTimestamp: bigint;      // new - when the loan matures
+  collateralRequired?: bigint;    // new - ETH collateral for borrower orders
+  
+  // Order metadata
+  sender: `0x${string}`;          // address of the order creator
+  orderId: `0x${string}`;         // replaces poolId - unique order identifier
+  orderData: LoanOrderData;       // replaces poolKey - full order parameters
+  taskCreatedBlock: number;       // block when order was submitted
+  taskId: number;                 // unique task ID in the system
+  
+  // Matching results (set after matching algorithm runs)
+  matchedAmount: bigint | null;   // replaces poolOutputAmount - amount matched
+  effectiveRate: bigint | null;   // replaces poolInputAmount - weighted average rate
 };
 
-export enum Feasibility {
-  NONE = "Token0 output > available token 0, token1 output > available token 1",
-  IDEAL = "Ideal for everyone involved",
-  IDEAL_ZERO_FOR_ONE = "Ideal for zeroForOne, Feasible for oneForZero",
-  IDEAL_ONE_FOR_ZERO = "Ideal for oneForZero, Feasible for zeroForOne",
-  SWAP_EACH_TASK = "Feasible to swap using the pool",
+// New type for loan order data structure
+export type LoanOrderData = {
+  token: `0x${string}`;           // USDC address
+  minPrincipal: bigint;           // minimum amount willing to lend/borrow
+  maxPrincipal: bigint;           // maximum amount willing to lend/borrow
+  minRate: bigint;                // minimum acceptable rate (for lenders)
+  maxRate: bigint;                // maximum acceptable rate (for borrowers)
+  maturityOptions: bigint[];      // acceptable maturity timestamps
+  collateralRatio: bigint;        // required collateral ratio (e.g., 150%)
+  expiry: bigint;                 // when this order expires
+  nonce: bigint;                  // for signature replay protection
+};
+
+// Updated feasibility enum for loan matching
+export enum LoanFeasibility {
+  NONE = "No compatible lenders and borrowers",
+  FULL_MATCH = "All orders fully matched at optimal rates",
+  PARTIAL_LENDER = "Lenders partially matched, borrowers fully matched",
+  PARTIAL_BORROWER = "Borrowers partially matched, lenders fully matched",
+  PARTIAL_BOTH = "Both sides partially matched",
+  NO_RATE_OVERLAP = "No overlap between lender min and borrower max rates",
+  MATURITY_MISMATCH = "No compatible maturity dates",
 }
 
-export type PossibleResult = {
-  matchings: Matching[];
-  poolSpotPrice: number;
-
-  poolAveragePrice: bigDecimal;
-  totalPoolToken0Input: bigint;
-  totalPoolToken1Input: bigint;
-  totalPoolToken0Output: bigint;
-  totalPoolToken1Output: bigint;
-
-  matchingAveragePrice: bigDecimal;
-  totalToken0Input: bigint;
-  totalToken1Input: bigint;
-  totalToken0Output: bigint;
-  totalToken1Output: bigint;
-
+// Updated result type for loan matching
+export type LoanMatchingResult = {
+  matchings: LoanMatching[];
+  
+  // Average rates and totals
+  averageLenderRate: bigDecimal;
+  averageBorrowerRate: bigDecimal;
+  totalLenderAmount: bigint;
+  totalBorrowerAmount: bigint;
+  
+  // Matched amounts
+  totalMatchedAmount: bigint;
+  unmatchedLenderAmount: bigint;
+  unmatchedBorrowerAmount: bigint;
+  
+  // Feasibility and optimization metrics
   feasible: boolean;
+  feasibilityType: LoanFeasibility;
+  rateSpread: bigDecimal;         // difference between avg lender and borrower rates
+  matchingEfficiency: bigDecimal;  // percentage of orders matched
 };
 
-export type Matching = {
-  tasks: Task[];
-  feasibility: Feasibility;
-
-  totalToken0Input: bigint;
-  totalToken1Input: bigint;
-  totalToken0Output: bigint;
-  totalToken1Output: bigint;
+// Updated matching type for loan orders
+export type LoanMatching = {
+  loanTasks: LoanTask[];          // grouped loan orders
+  feasibility: LoanFeasibility;
+  
+  // Matched amounts by side
+  totalLenderAmount: bigint;
+  totalBorrowerAmount: bigint;
+  matchedAmount: bigint;
+  
+  // Rate information
+  effectiveRate: bigint;          // weighted average rate for this matching
+  maturityTimestamp: bigint;      // agreed maturity date
 };
 
+// Keep original PoolKey for potential future use with liquidations
 export type PoolKey = {
   currency0: `0x${string}`;
   currency1: `0x${string}`;
@@ -113,26 +145,37 @@ export const avsDirectory = getContract({
   client: { public: publicClient, wallet: walletClient },
 });
 
+// Note: This will need to be updated to DebtOrderServiceManager
 export const serviceManager = getContract({
   address: deploymentAddresses.avs.serviceManagerProxy,
   abi: ServiceManagerABI,
   client: { public: publicClient, wallet: walletClient },
 });
 
-export const quoterContract = getContract({
-  address: deploymentAddresses.hook.quoter,
-  abi: QuoterABI,
+// Quoter not needed for loan matching - remove or comment out
+// export const quoterContract = getContract({
+//   address: deploymentAddresses.hook.quoter,
+//   abi: QuoterABI,
+//   client: { public: publicClient, wallet: walletClient },
+// });
+
+// Update to point to DebtHook instead
+export const debtHook = getContract({
+  address: deploymentAddresses.hook.hook, // TODO: Update to DebtHook address
+  abi: HookABI, // TODO: Update to DebtHook ABI
   client: { public: publicClient, wallet: walletClient },
 });
 
-export const hook = getContract({
-  address: deploymentAddresses.hook.hook,
-  abi: HookABI,
-  client: { public: publicClient, wallet: walletClient },
-});
-
+// Keep poolManager for potential liquidation monitoring
 export const poolManager = getContract({
   address: deploymentAddresses.hook.poolManager,
   abi: PoolManagerABI,
+  client: { public: publicClient, wallet: walletClient },
+});
+
+// Add DebtOrderBook contract
+export const debtOrderBook = getContract({
+  address: deploymentAddresses.hook.orderBook || "0x0", // TODO: Add to deployment addresses
+  abi: [], // TODO: Add DebtOrderBook ABI
   client: { public: publicClient, wallet: walletClient },
 });
