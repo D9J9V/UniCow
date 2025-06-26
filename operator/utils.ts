@@ -8,7 +8,7 @@ import {
   http,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { anvil, holesky } from "viem/chains";
+import { anvil, sepolia } from "viem/chains";
 import { AvsDirectoryABI } from "./abis/AvsDirectory";
 import { DelegationManagerABI } from "./abis/DelegationManager";
 import { HookABI } from "./abis/Hook";
@@ -115,15 +115,15 @@ export const account = privateKeyToAccount(
 );
 
 export const walletClient = createWalletClient({
-  chain: process.env.IS_DEV === "true" ? anvil : holesky,
-  transport: http(),
+  chain: process.env.IS_DEV === "true" ? anvil : sepolia,
+  transport: http(process.env.ETHEREUM_RPC_URL),
   account,
   pollingInterval: 2000,
 });
 
 export const publicClient = createPublicClient({
-  chain: process.env.IS_DEV === "true" ? anvil : holesky,
-  transport: http(),
+  chain: process.env.IS_DEV === "true" ? anvil : sepolia,
+  transport: http(process.env.ETHEREUM_RPC_URL),
   pollingInterval: 2000,
 });
 

@@ -1,5 +1,11 @@
 # UniCow Integration with DebtHook Protocol
 
+## ✅ DEPLOYED (June 26, 2025)
+
+The EigenLayer AVS for decentralized order matching is now live:
+- **ServiceManager**: `0x3333Bc77EdF180D81ff911d439F02Db9e34e8603` (Ethereum Sepolia)
+- **Operator**: `0x2f131a86C5CB54685f0E940B920c54E152a44B02` (Authorized on DebtHook)
+
 ## Overview
 
 This repository serves as the foundation for DebtHook's Phase C implementation: a decentralized, EigenLayer-secured order matching system. We've chosen UniCow as our base because it provides a sophisticated Coincidence of Wants (CoW) matching algorithm that can be adapted from swap matching to debt order matching.

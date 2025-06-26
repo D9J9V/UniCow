@@ -1,5 +1,12 @@
 # UniCow Integration with DebtHook Protocol - Developer Guide
 
+## ✅ DEPLOYED (June 26, 2025)
+
+The EigenLayer AVS integration is now live with:
+- **ServiceManager**: `0x3333Bc77EdF180D81ff911d439F02Db9e34e8603` (Ethereum Sepolia)
+- **DebtHook**: `0x49e39eFDE0C93F6601d84cb5C6D24c1B23eB00C8` (Unichain Sepolia, with operator authorization)
+- **Authorized Operator**: `0x2f131a86C5CB54685f0E940B920c54E152a44B02`
+
 ## Overview
 
 This guide provides implementation details for integrating UniCow's Coincidence of Wants (CoW) functionality into DebtHook's debt order matching system. UniCow serves as the foundation for Phase C of DebtHook development, enabling decentralized order matching secured by EigenLayer.
@@ -278,12 +285,12 @@ class DebtOrderOperator {
 
 ## Development Checklist
 
-- [ ] Fork UniCow repository
-- [ ] Modify task structures for loans
-- [ ] Adapt matching algorithm
-- [ ] Create DebtOrderServiceManager
-- [ ] Implement batch loan creation
-- [ ] Deploy operator infrastructure
+- [x] Fork UniCow repository
+- [x] Modify task structures for loans
+- [x] Adapt matching algorithm
+- [x] Create DebtOrderServiceManager
+- [x] Implement batch loan creation (with operator authorization)
+- [x] Deploy operator infrastructure
 - [ ] Test with real order flow
 - [ ] Security audit
 - [ ] Production deployment

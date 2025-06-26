@@ -223,32 +223,30 @@ contract DebtOrderServiceManager is ECDSAServiceManagerBase, Pausable {
         LoanOrderTask[] calldata tasks,
         IDebtHook.LoanMatch[] memory matches
     ) internal pure {
-        // Track matched amounts per task
-        mapping(uint32 => uint256) memory matchedAmounts;
-        
+        // Simple validation without tracking cumulative amounts
         for (uint256 i = 0; i < matches.length; i++) {
-            IDebtHook.LoanMatch memory match = matches[i];
+            IDebtHook.LoanMatch memory loanMatch = matches[i];
             
             // Find corresponding lender and borrower tasks
             bool foundLender = false;
             bool foundBorrower = false;
             
             for (uint256 j = 0; j < tasks.length; j++) {
-                if (tasks[j].sender == match.lender && tasks[j].isLender) {
+                if (tasks[j].sender == loanMatch.lender && tasks[j].isLender) {
                     // Validate lender constraints
-                    require(match.interestRateBips >= tasks[j].minRate, "Rate below lender minimum");
-                    require(match.maturityTimestamp == tasks[j].maturityTimestamp, "Maturity mismatch");
-                    matchedAmounts[tasks[j].taskId] += match.principalAmount;
-                    require(matchedAmounts[tasks[j].taskId] <= tasks[j].maxPrincipal, "Exceeds lender max");
+                    require(loanMatch.interestRateBips >= tasks[j].minRate, "Rate below lender minimum");
+                    require(loanMatch.maturityTimestamp == tasks[j].maturityTimestamp, "Maturity mismatch");
+                    require(loanMatch.principalAmount <= tasks[j].maxPrincipal, "Exceeds lender max");
+                    require(loanMatch.principalAmount >= tasks[j].minPrincipal, "Below lender min");
                     foundLender = true;
                 }
                 
-                if (tasks[j].sender == match.borrower && !tasks[j].isLender) {
+                if (tasks[j].sender == loanMatch.borrower && !tasks[j].isLender) {
                     // Validate borrower constraints
-                    require(match.interestRateBips <= tasks[j].maxRate, "Rate above borrower maximum");
-                    require(match.maturityTimestamp == tasks[j].maturityTimestamp, "Maturity mismatch");
-                    matchedAmounts[tasks[j].taskId] += match.principalAmount;
-                    require(matchedAmounts[tasks[j].taskId] <= tasks[j].maxPrincipal, "Exceeds borrower max");
+                    require(loanMatch.interestRateBips <= tasks[j].maxRate, "Rate above borrower maximum");
+                    require(loanMatch.maturityTimestamp == tasks[j].maturityTimestamp, "Maturity mismatch");
+                    require(loanMatch.principalAmount <= tasks[j].maxPrincipal, "Exceeds borrower max");
+                    require(loanMatch.principalAmount >= tasks[j].minPrincipal, "Below borrower min");
                     foundBorrower = true;
                 }
             }
